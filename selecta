@@ -83,15 +83,11 @@ class Selecta
   def main
     config = Configuration.from_inputs($stdin.readlines)
     matcher = proc { |query|
-      things = IO.popen(['matcher', '--limit', '50', query], 'r+') do |io|
+      IO.popen(['matcher', '--limit', '50', query], 'r+') do |io|
         io.puts config.choices
         io.close_write
         io.read.split("\n")
       end
-      # re = query.split(//).map(&Regexp.method(:escape)).join('.*')
-      # re = /#{re}/i
-      # config.choices.select { |s| s =~ re }
-      things
     }
     SearchUI.new.run(config, matcher)
   end
