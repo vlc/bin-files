@@ -1,0 +1,2 @@
+#!/bin/sh
+java -Xmx1G -jar /Users/nkpart/.conscript/sbt-launch.jar @/Users/nkpart/.conscript/n8han/giter8/g8/launchconfig "$@"

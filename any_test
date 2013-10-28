@@ -1,0 +1,12 @@
+#! /bin/bash
+
+case $1 in
+  *.hs)
+    command="runhaskell"
+    ;;
+  *.rb)
+    command="rails_test"
+    ;;
+esac
+
+$command $1

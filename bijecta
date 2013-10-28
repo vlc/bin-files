@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# vim: set ft=ruby:
+
+# This file executes as a bash script, which turns around and executes Ruby via
+# the line below. The -x argument to Ruby makes it discard everything before
+# the second "!ruby" shebang. This allows us to work on Linux, where the
+# shebang can only have one argument so we can't directly say
+# "#!/usr/bin/env ruby --disable-gems". Thanks for that, Linux.
+#
+# If this seems confusing, don't worry. You can treat it as a normal Ruby file
+# starting with the "!ruby" shebang below.
+
+exec /usr/bin/env ruby --disable-gems -x "$0" $*
+#!ruby
+
+if ARGV.to_a == ["help"]
+  puts "USAGE: bijecta <regexp> <subcommand>"
+  puts 
+  puts "Runs each line of stdin through `regexp`, into `command`, then "
+  puts "prints out the original lines."
+  puts 
+  puts "  regexp - A ruby regular expression with a single group."
+  puts "           The matched group will get passed to the subcommand."
+  puts "  command - Command to filter the matched groups. The output is then"
+  puts "            matched with the initial input to bijecta"
+  puts
+  puts "Example:"
+  puts " # Identity"
+  puts " echo 1,foo | bijecta \"\d,(.*)\" \"xargs -I {} echo {}\""
+  puts " # Selecta - select presents stdin as a list to be chosen from, and echos the chosen line to stdout"
+  puts " echo 1,foo | bijecta \"\d,(.*)\" selecta"
+  exit 0
+end
+regex = Regexp.new ARGV[0]
+
+
+command = ARGV[1]
+
+keyed = {}
+lines = []
+$stdin.each_line do |line|
+  key = line[regex, 1]
+  keyed[key] = line
+  lines << key
+end
+
+chosen = IO.popen(command, "r+") do |child|
+  lines.each do |line| child.puts line end
+  child.close_write
+  child.read
+end
+
+puts keyed[chosen.chomp]
