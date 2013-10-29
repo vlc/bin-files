@@ -1,0 +1,21 @@
+#! /bin/bash
+
+# for find use -name, it's fast. -path is slow. prefer grep -v.
+
+git ls-files -c -o --exclude-standard 2>/dev/null || \
+  find . -type f -and -not \( \
+    -name "*.jar" -or \
+    -name "*.png" -or \
+    -name "*.zip" -or \
+    -name "*.jnilib" -or \
+    -name "*.pdf" -or \
+    -name "*.sqlite3" -or \
+    -name "*.dll" -or \
+    -name "*.fsprof" -or \
+    -name "*.sln" -or \
+    -name "*.class" -or \
+    -name "errors.err" -or \
+    -name ".DS_Store" -or \
+    -false \
+    \) | grep -v .git
+
