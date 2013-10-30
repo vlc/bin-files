@@ -17,5 +17,5 @@ git ls-files -c -o --exclude-standard 2>/dev/null || \
     -name "errors.err" -or \
     -name ".DS_Store" -or \
     -false \
-    \) | grep -v .git
+    \) | grep -v .git | grep -v .svn
 
