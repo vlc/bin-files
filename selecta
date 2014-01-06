@@ -17,15 +17,16 @@ if RUBY_VERSION < '1.9.3'
   abort "error: Selecta requires Ruby 1.9.3 or higher."
 end
 
+require "optparse"
 require "io/console"
 
-# I don't know how to get these key codes other than by hard-coding the
-# ordinals
-KEY_CTRL_C = 3.chr
-KEY_CTRL_N = 14.chr
-KEY_CTRL_P = 16.chr
-KEY_CTRL_W = 23.chr
-KEY_DELETE = 127.chr
+KEY_CTRL_C     = ?\C-c
+KEY_CTRL_N     = ?\C-n
+KEY_CTRL_P     = ?\C-p
+KEY_CTRL_W     = ?\C-w
+KEY_ARROW_UP   = "[A"
+KEY_ARROW_DOWN = "[B"
+KEY_DELETE = 127.chr # Equivalent to ?\C-?
 
 class SearchUI
   def run(config, matcher)
@@ -39,7 +40,7 @@ class SearchUI
     Screen.with_screen do |screen, tty|
       # We emit the number of lines we'll use later so we don't clobber whatever
       # was already on the screen.
-      (config.visible_choices).times { tty.puts }
+      config.visible_choices.times { tty.puts }
       begin
         ui_event_loop(search, screen, tty)
       ensure
@@ -54,17 +55,20 @@ class SearchUI
   def ui_event_loop(search, screen, tty)
     while not search.done?
       Renderer.render!(search, screen)
-      search = handle_key(search, tty.get_char)
+      search = handle_key(search, tty.get_char, tty)
     end
     search
   end
 
   # On each keystroke, generate a new search object
-  def handle_key(search, key)
-    case key
+  def handle_key(search, key, tty)
 
-    when KEY_CTRL_N then search.down
-    when KEY_CTRL_P then search.up
+    # If we get the ansi escape character, read the next two characters to see if it's up/down arrow
+    key = tty.get_char + tty.get_char if key == ANSI::ESC
+
+    case key
+    when KEY_CTRL_N, KEY_ARROW_DOWN  then search.down
+    when KEY_CTRL_P, KEY_ARROW_UP    then search.up
 
     when KEY_CTRL_W then search.delete_word
     when KEY_DELETE then search.backspace
@@ -81,12 +85,19 @@ end
 
 class Selecta
   def main
-    config = Configuration.from_inputs($stdin.readlines)
+    # We have to parse options before trying to read the input in case the user
+    # did '-h', an invalid option, etc. and we need to terminate.
+    options = Configuration.parse_options(ARGV)
+    config = Configuration.from_inputs($stdin.readlines, options)
     matcher = proc { |query|
-      IO.popen(['matcher', '--limit', '50', query], 'r+') do |io|
-        io.puts config.choices
-        io.close_write
-        io.read.split("\n")
+      if query.length > 0
+        IO.popen(['matcher', '--limit', '50', query], 'r+') do |io|
+          io.puts config.choices
+          io.close_write
+          io.read.split("\n")
+        end
+      else
+        config.choices
       end
     }
     SearchUI.new.run(config, matcher)
@@ -96,7 +107,7 @@ end
 class Produca
   def main
     command = ARGV.join(" ")
-    config = Configuration.new(20, [])
+    config = Configuration.new(20, "", [])
     matcher = proc { |query|
       if query.length > 0
         `echo "#{query}" | #{command}`.split("\n")
@@ -108,16 +119,48 @@ class Produca
   end
 end
 
-class Configuration < Struct.new(:visible_choices, :choices)
-  def initialize(visible_choices, choices)
+class Configuration < Struct.new(:visible_choices, :initial_search, :choices)
+  def initialize(visible_choices, initialize, choices)
     # Constructor is defined to force argument presence; otherwise Struct
     # defaults missing arguments to nil
     super
   end
 
-  def self.from_inputs(choices)
+  def self.from_inputs(choices, options)
     choices = massage_choices(choices)
-    Configuration.new(20, choices)
+    Configuration.new(20, options.fetch(:search), choices)
+  end
+
+  def self.default_options
+    parse_options([])
+  end
+
+  def self.parse_options(argv)
+    options = {}
+
+    parser = OptionParser.new do |opts|
+      opts.banner = "Usage: #{$PROGRAM_NAME} [options]"
+
+      opts.on("-h", "--help", "Show this message") do |v|
+        puts opts
+        exit
+      end
+
+      options[:search] = ""
+      opts.on("-s", "--search SEARCH", "Specify an initial search string") do |search|
+        options[:search] = search
+      end
+    end
+
+    begin
+      parser.parse!(argv)
+    rescue OptionParser::InvalidOption => e
+      $stderr.puts e
+      $stderr.puts parser
+      exit 1
+    end
+
+    options
   end
 
   def self.massage_choices(choices)
@@ -153,7 +196,7 @@ class Search
     new(:matcher => matcher,
         :visible_choices => config.visible_choices,
         :index => 0,
-        :query => "",
+        :query => config.initial_search,
         :done => false)
   end
 
@@ -166,6 +209,7 @@ class Search
   end
 
   def selected_choice
+    raise SystemExit if matches.empty?
     matches.fetch(@index)
   end
 
@@ -189,7 +233,8 @@ class Search
   end
 
   def delete_word
-    merge(:query => @query.sub(/[^ ]* *$/, ""))
+    merge(:index => 0,
+          :query => @query.sub(/[^ ]* *$/, ""))
   end
 
   def matches
@@ -198,6 +243,67 @@ class Search
 
   def done
     merge(:done => true)
+  end
+end
+
+class Score
+  class << self
+    def score(choice, query)
+      return 1.0 if query.length == 0
+      return 0.0 if choice.length == 0
+
+      choice = choice.downcase
+      query = query.downcase
+
+      match_length = compute_match_length(choice, query.each_char.to_a)
+      return 0.0 unless match_length
+
+      # Penalize longer matches.
+      score = query.length.to_f / match_length.to_f
+
+      # Normalize vs. the length of the choice, penalizing longer strings.
+      score / choice.length
+    end
+
+    # Find the length of the shortest substring matching the given characters.
+    def compute_match_length(string, chars)
+      first_char, *rest = chars
+      first_indexes = find_char_in_string(string, first_char)
+
+      first_indexes.map do |first_index|
+        last_index = find_end_of_match(string, rest, first_index)
+        if last_index
+          last_index - first_index + 1
+        else
+          nil
+        end
+      end.compact.min
+    end
+
+    # Find all occurrences of the character in the string, returning their indexes.
+    def find_char_in_string(string, char)
+      index = 0
+      indexes = []
+      while index
+        index = string.index(char, index)
+        if index
+          indexes << index
+          index += 1
+        end
+      end
+      indexes
+    end
+
+    # Find each of the characters in the string, moving strictly left to right.
+    def find_end_of_match(string, chars, first_index)
+      last_index = first_index
+      chars.each do |this_char|
+        index = string.index(this_char, last_index + 1)
+        return nil unless index
+        last_index = index
+      end
+      last_index
+    end
   end
 end
 
@@ -215,11 +321,12 @@ class Renderer < Struct.new(:search, :screen)
     search_line = "> " + search.query
     matches = search.matches
     unless matches.empty?
-      matches[search.index] = Text[:yellow_black, matches.fetch(search.index)]
+      # matches[search.index] = Text[:yellow_black, matches.fetch(search.index), :reset]
+      matches[search.index] = Text[:inverse, matches.fetch(search.index), :reset]
     end
     matches = correct_match_count(matches)
-    choices = [search_line] + matches
-    Rendered.new(choices, search_line)
+    lines = [search_line] + matches
+    Rendered.new(lines, search_line)
   end
 
   def correct_match_count(matches)
@@ -323,14 +430,25 @@ class Screen
   end
 
   def write_text_object(line, column, text)
-    highlight = false
+    # Blank the line before drawing to it
+    ansi.setpos!(line, 0)
+    ansi.addstr!(" " * width)
+
     text.components.each do |component|
       if component.is_a? String
         ansi.setpos!(line, column)
+        # Don't draw off the edge of the screen.
+        #   - width - 1 is the last column we have (zero-indexed)
+        #   - subtract the current column from that to get the number of
+        #   columns we have left.
+        chars_to_draw = [0, width - 1 - column].max
+        component = component[0..chars_to_draw]
         ansi.addstr!(component)
         column += component.length
-      elsif component == :highlight
-        highlight = true
+      elsif component == :inverse
+        ansi.inverse!
+      elsif component == :reset
+        ansi.reset!
       else
         if component =~ /_/
           fg, bg = component.to_s.split(/_/).map(&:to_sym)
@@ -340,8 +458,6 @@ class Screen
         ansi.color!(fg, bg)
       end
     end
-    remaining_cols = [width - column, 0].max
-    ansi.addstr!(" " * remaining_cols)
   end
 end
 
@@ -374,24 +490,18 @@ class ANSI
     @file = file
   end
 
-  def escape(sequence)
+  def self.escape(sequence)
     ESC + "[" + sequence
   end
 
-  def reset
-    escape "2J"
-  end
-
-  def hide_cursor
-    escape "?25l"
-  end
-
-  def show_cursor
-    escape "?25h"
-  end
+  def clear;       ANSI.escape "2J";   end
+  def hide_cursor; ANSI.escape "?25l"; end
+  def show_cursor; ANSI.escape "?25h"; end
+  def inverse;     ANSI.escape("7m");  end
+  def reset;       ANSI.escape("0m");  end
 
   def setpos(line, column)
-    escape "#{line + 1};#{column + 1}H"
+    ANSI.escape "#{line + 1};#{column + 1}H"
   end
 
   def addstr(str)
@@ -399,7 +509,6 @@ class ANSI
   end
 
   def color(fg, bg=:default)
-    normal = "22"
     fg_codes = {
       :black => 30,
       :red => 31,
@@ -424,13 +533,15 @@ class ANSI
     }
     fg_code = fg_codes.fetch(fg)
     bg_code = bg_codes.fetch(bg)
-    escape "#{normal};#{fg_code};#{bg_code}m"
+    ANSI.escape "#{fg_code};#{bg_code}m"
   end
 
-  def reset!(*args); write reset(*args); end
+  def clear!(*args); write clear(*args); end
   def setpos!(*args); write setpos(*args); end
   def addstr!(*args); write addstr(*args); end
   def color!(*args); write color(*args); end
+  def inverse!(*args); write inverse(*args); end
+  def reset!(*args); write reset(*args); end
   def hide_cursor!(*args); write hide_cursor(*args); end
   def show_cursor!(*args); write show_cursor(*args); end
 
